@@ -6,55 +6,50 @@ A Python/FastAPI backend service that guarantees payments are processed **exactl
 
 ## 1. Architecture Diagram
 
-```
-Client (e-commerce shop)
-        |
-        | POST /process-payment
-        | Headers: Idempotency-Key, Content-Type
-        | Body: { amount, currency }
-        |
-        v
-+-------------------+
-|  FastAPI Gateway  |
-|                   |
-|  1. Key exists?   |--YES--> Same payload? --YES--> Return cached response
-|                   |                      |          + X-Cache-Hit: true
-|                   |                      |
-|                   |                      --NO---> Return 422 Conflict
-|                   |
-|                   |         In-flight?   --YES--> Wait, then return result
-|                   |
-|  2. New key       |
-|     Mark in-flight|
-|     Sleep 2s      |
-|     Process pay   |
-|     Store result  |
-|     Return 201    |
-+-------------------+
-        |
-        v
-  In-Memory Store
-  { key -> { payload_hash, response, status_code, timestamp, in_flight } }
+**Decision flowchart:**
+
+```mermaid
+flowchart TD
+    A[POST /process-payment] --> B{Key exists in store?}
+    B -- No --> C[Mark key in-flight]
+    C --> D[Sleep 2s - simulate processing]
+    D --> E[Save response + status_code]
+    E --> F[Return 201 Created]
+
+    B -- Yes, expired --> C
+
+    B -- Yes, valid --> G{Currently in-flight?}
+    G -- Yes --> H[Wait on event]
+    H --> I
+    G -- No --> I{Same payload hash?}
+
+    I -- No --> J[Return 422 Unprocessable Entity]
+    I -- Yes --> K[Return cached response + X-Cache-Hit: true]
 ```
 
-**Sequence Diagram:**
+**Sequence diagram:**
 
-```
-Client          Gateway         Store
-  |                |               |
-  |-- POST ------->|               |
-  |   key-001      |-- lookup ---->|
-  |                |<-- not found -|
-  |                |-- mark in-flight -->|
-  |                |   (sleep 2s)        |
-  |                |-- save result ----->|
-  |<-- 201 --------|                     |
-  |                |                     |
-  |-- POST ------->|                     |
-  |   key-001      |-- lookup ---------->|
-  |  (duplicate)   |<-- found: same key -|
-  |<-- 201 --------|                     |
-  |  X-Cache-Hit   |                     |
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as Gateway
+    participant S as Store
+
+    C->>G: POST /process-payment (Idempotency-Key: X)
+    G->>S: lookup(X)
+    alt key not found
+        G->>S: mark X as in-flight
+        G->>G: sleep 2s (simulate processing)
+        G->>S: save response
+        G-->>C: 201 Created
+    else key found, in-flight (race condition)
+        G->>G: wait on event
+        G-->>C: 201 Created (same result as first request)
+    else key found, same payload
+        G-->>C: 201 Created + X-Cache-Hit: true
+    else key found, different payload
+        G-->>C: 422 Unprocessable Entity
+    end
 ```
 
 ---
